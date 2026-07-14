@@ -1,0 +1,8 @@
+node_modules/
+dist/
+tokens/
+data/
+.env
+*.log
+userDataDir/
+.wwebjs_auth/
