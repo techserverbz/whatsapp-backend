@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import type { NextFunction, Request, Response } from 'express';
 import { config } from './config';
 import { getUserAuthState } from './crmDb';
+import { hasSendAccess, hasViewAll } from './access';
 
 export interface CrmUser {
   userId: string;
@@ -28,6 +29,29 @@ export function isAdminUser(user: CrmUser | null | undefined): boolean {
     return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
   }
   return user.role === 'superadmin';
+}
+
+/**
+ * May this user SEND messages? Device admins always can; otherwise a global
+ * WPP_ALLOW_VIEWER_SEND flag or a per-user send-access grant (see access.ts)
+ * unlocks it. Everyone else is a read-only viewer.
+ */
+export function canSend(user: CrmUser | null | undefined): boolean {
+  if (!user) return false;
+  if (isAdminUser(user)) return true;
+  if (config.allowViewerSend) return true;
+  return hasSendAccess(user.email);
+}
+
+/**
+ * May this user see ALL leads/chats, or only the ones ALLOTTED (assigned) to
+ * them? Admins always see all; other users default to allotted-only unless
+ * granted view-all (see access.ts).
+ */
+export function canViewAll(user: CrmUser | null | undefined): boolean {
+  if (!user) return false;
+  if (isAdminUser(user)) return true;
+  return hasViewAll(user.email);
 }
 
 /** Verify a CRM-issued JWT (the `crm_token` cookie or a bearer) with the shared secret. */

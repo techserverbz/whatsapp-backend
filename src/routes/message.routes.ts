@@ -2,8 +2,15 @@ import { Router } from 'express';
 import { session } from '../whatsapp/session';
 import { serializeMessage } from '../whatsapp/serializers';
 import { cacheMessages, getCachedMessage } from '../whatsapp/msgCache';
+import { config } from '../config';
+import { recordSent } from '../attribution';
+import type { CrmUser } from '../auth';
 
 const router = Router();
+
+/** The CRM user attached by `requireAuth` (undefined in legacy API-key mode). */
+const crmUserOf = (req: unknown): CrmUser | undefined =>
+  (req as { crmUser?: CrmUser }).crmUser;
 
 /**
  * Accepts either a full chat id (`123@c.us` / `123-456@g.us`) or a bare
@@ -26,8 +33,19 @@ router.post('/text', async (req, res, next) => {
         .json({ error: 'Both "to" and a non-empty "content" string are required.' });
     }
     const client = session.getClient();
-    const result: any = await client.sendText(normalizeChatId(to), content);
-    res.json(serializeMessage(result));
+    const chatId = normalizeChatId(to);
+    const result: any = await client.sendText(chatId, content);
+    const dto = serializeMessage(result);
+    recordSent({
+      messageId: dto.id,
+      chatId: dto.chatId || chatId,
+      engine: 'wppconnect',
+      sessionId: config.session,
+      user: crmUserOf(req),
+      body: content,
+      hasMedia: false,
+    });
+    res.json(dto);
   } catch (e) {
     next(e);
   }
@@ -44,10 +62,22 @@ router.post('/file', async (req, res, next) => {
       return res.status(400).json({ error: '"to" and "base64" (data URL) are required.' });
     }
     const client = session.getClient();
-    const result: any = await (client as any).sendFile(normalizeChatId(to), base64, {
+    const chatId = normalizeChatId(to);
+    const result: any = await (client as any).sendFile(chatId, base64, {
       type: type ?? 'auto-detect',
       filename: filename ?? 'file',
       caption: caption ?? '',
+    });
+    const msgId =
+      result?.id?._serialized ?? (typeof result?.id === 'string' ? result.id : '');
+    recordSent({
+      messageId: msgId,
+      chatId,
+      engine: 'wppconnect',
+      sessionId: config.session,
+      user: crmUserOf(req),
+      body: caption ?? '',
+      hasMedia: true,
     });
     res.json(result);
   } catch (e) {

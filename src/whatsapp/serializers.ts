@@ -32,6 +32,9 @@ export interface ChatDTO {
   muted: boolean;
   lastMessage: string;
   lastMessageFromMe: boolean;
+  /** Real phone number (individual chats), for CRM matching. Set for @c.us here;
+   *  the webjs engine resolves @lid ids to their number too. */
+  number?: string;
 }
 
 export interface MessageDTO {
@@ -108,6 +111,7 @@ export function serializeChat(chat: any): ChatDTO {
     muted: (chat?.muteExpiration ?? 0) > 0,
     lastMessage: last ? previewText(last) : '',
     lastMessageFromMe: !!last?.fromMe,
+    number: !isGroup && id.endsWith('@c.us') ? id.split('@')[0] : undefined,
   };
 }
 

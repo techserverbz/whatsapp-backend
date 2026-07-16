@@ -8,17 +8,24 @@ import path from 'path';
 import { config, isAllowedOrigin } from './config';
 import {
   authenticateToken,
+  canSend,
+  canViewAll,
   isAdminUser,
   requireAuth,
   ssoEnabled,
   tokenFromRequest,
 } from './auth';
 import type { CrmUser } from './auth';
-import { initSocket, SocketEvents, startSocketRevalidation } from './socket';
+import { emitToAll, initSocket, SocketEvents, startSocketRevalidation } from './socket';
 import { session } from './whatsapp/session';
+import { manager } from './engines/manager';
 import sessionRoutes from './routes/session.routes';
+import sessionsRoutes from './routes/sessions.routes';
 import chatRoutes from './routes/chat.routes';
 import messageRoutes from './routes/message.routes';
+import attributionRoutes from './routes/attribution.routes';
+import crmRoutes from './routes/crm.routes';
+import accessRoutes from './routes/access.routes';
 
 const app = express();
 
@@ -40,11 +47,12 @@ app.get('/api/health', (_req, res) => {
 
 // Who is the logged-in CRM user? (self-handles 401 so the frontend can show login.)
 app.get('/api/auth/me', async (req: Request, res: Response) => {
-  if (!ssoEnabled()) return res.json({ sso: false, user: null, isAdmin: true, canSend: true });
+  if (!ssoEnabled())
+    return res.json({ sso: false, user: null, isAdmin: true, canSend: true, viewAll: true });
   const user = await authenticateToken(tokenFromRequest(req));
   if (!user) return res.status(401).json({ error: 'Not authenticated', login: true });
   const admin = isAdminUser(user);
-  res.json({ sso: true, user, isAdmin: admin, canSend: admin || config.allowViewerSend });
+  res.json({ sso: true, user, isAdmin: admin, canSend: canSend(user), viewAll: canViewAll(user) });
 });
 
 // App sign-out: clear the CRM cookie for this app's host (any user can do this;
@@ -154,7 +162,14 @@ app.post('/api/auth/login', loginLimiter, async (req: Request, res: Response) =>
   });
 
   const admin = isAdminUser(user);
-  res.json({ sso: true, user, isAdmin: admin, canSend: admin || config.allowViewerSend, token });
+  res.json({
+    sso: true,
+    user,
+    isAdmin: admin,
+    canSend: canSend(user),
+    viewAll: canViewAll(user),
+    token,
+  });
 });
 
 // CSRF guard: browser CORS does NOT block the *sending* of a cross-origin
@@ -177,27 +192,35 @@ app.use('/api', requireAuth);
 // Unless viewers are allowed to send, all state-changing WhatsApp actions
 // (send / mark-seen / typing) are admin-only too — everyone else is read-only.
 // NOTE: `path` here is mount-relative (e.g. "/session/start", not "/api/...").
-function requiresAdmin(method: string, path: string): boolean {
+function permNeeded(method: string, path: string): 'admin' | 'send' | null {
+  // Managing the send-access allow-list is admin-only (any method).
+  if (/^\/access(\/|$)/.test(path)) return 'admin';
+  // Linking / unlinking the WhatsApp device is admin-only.
   if (method === 'POST' && (path === '/session/start' || path === '/session/logout')) {
-    return true;
+    return 'admin';
   }
-  if (config.allowViewerSend) return false;
-  if (method === 'POST' && (path === '/messages/text' || path === '/messages/file')) {
-    return true;
-  }
-  if (method === 'POST' && /^\/chats\/[^/]+\/(seen|typing)$/.test(path)) return true;
-  return false;
+  // Sending / chat-write actions — the global session AND per-engine sessions.
+  const isSend =
+    (method === 'POST' && (path === '/messages/text' || path === '/messages/file')) ||
+    (method === 'POST' && /^\/chats\/[^/]+\/(seen|typing)$/.test(path)) ||
+    (method === 'POST' && /^\/sessions\/[^/]+\/messages\/(text|file)$/.test(path)) ||
+    (method === 'POST' && /^\/sessions\/[^/]+\/chats\/[^/]+\/(seen|typing)$/.test(path));
+  if (isSend) return 'send';
+  return null;
 }
 
 app.use('/api', (req: Request, res: Response, next: NextFunction) => {
   if (!config.jwtSecret) return next(); // no SSO -> no role gating (open dev)
   // Normalise so it works whether req.path is mount-relative or absolute.
   const relPath = req.path.replace(/^\/api/, '');
-  if (requiresAdmin(req.method, relPath)) {
-    const user = (req as unknown as { crmUser?: CrmUser }).crmUser;
-    if (!isAdminUser(user)) {
-      return res.status(403).json({ error: 'Admin access required', adminOnly: true });
-    }
+  const need = permNeeded(req.method, relPath);
+  if (!need) return next();
+  const user = (req as unknown as { crmUser?: CrmUser }).crmUser;
+  if (need === 'admin' && !isAdminUser(user)) {
+    return res.status(403).json({ error: 'Admin access required', adminOnly: true });
+  }
+  if (need === 'send' && !canSend(user)) {
+    return res.status(403).json({ error: 'You do not have permission to send messages.', noSend: true });
   }
   next();
 });
@@ -213,8 +236,12 @@ const messageLimiter = rateLimit({
 });
 
 app.use('/api/session', sessionRoutes);
+app.use('/api/sessions', sessionsRoutes); // multi-session, multi-engine (webjs, …)
 app.use('/api/chats', chatRoutes);
 app.use('/api/messages', messageLimiter, messageRoutes);
+app.use('/api/attribution', attributionRoutes); // "who sent what" audit log
+app.use('/api/crm', crmRoutes); // CRM contact lookup + create (dual naming)
+app.use('/api/access', accessRoutes); // per-user send-access allow-list (admin-only)
 
 // Centralised error handler. Expected 4xx (e.g. the 409 "not connected" case,
 // route-level 400s) pass their message through; 5xx return a generic message
@@ -240,6 +267,14 @@ io.on('connection', (socket) => {
 // Disconnect sockets whose CRM access is revoked mid-session.
 startSocketRevalidation();
 
+// Bridge multi-engine session events (WhatsApp Web JS, …) to the frontend,
+// tagged with the sessionId. The QR goes to admins only; everything else to all.
+manager.onEvent((sessionId, event, payload) => {
+  // Every socket is CRM-authenticated, so emit to all — this reliably delivers
+  // the QR to the admin who opened the session (no admin-room timing race).
+  emitToAll('session:event', { sessionId, type: event, payload });
+});
+
 /**
  * A linked session persists as a Chromium profile at `<tokenFolder>/<session>`.
  * If one exists we can reconnect on boot with no QR re-scan.
@@ -262,8 +297,8 @@ httpServer.listen(config.port, config.host, () => {
   if (config.host === '0.0.0.0' && !config.apiKey) {
     console.warn(
       '  ⚠  Bound to 0.0.0.0 (LAN-reachable) with NO API_KEY set — anyone on the\n' +
-        '     network can control this WhatsApp account. Set API_KEY (and VITE_API_KEY\n' +
-        '     on the frontend) before exposing beyond localhost.\n',
+      '     network can control this WhatsApp account. Set API_KEY (and VITE_API_KEY\n' +
+      '     on the frontend) before exposing beyond localhost.\n',
     );
   }
 

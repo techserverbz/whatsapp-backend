@@ -6,3 +6,7 @@ data/
 *.log
 userDataDir/
 .wwebjs_auth/
+.wwebjs_cache/
+# WhatsApp session storage (LocalAuth / WPPConnect tokens) — never commit
+webjs/
+wwp/

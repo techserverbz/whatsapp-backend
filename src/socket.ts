@@ -11,6 +11,8 @@ export const SocketEvents = {
   SessionStatus: 'session:status',
   SessionQr: 'session:qr',
   MessageNew: 'message:new',
+  /** Attribution patch: which CRM user sent an outbound message (id + sentBy). */
+  MessageSender: 'message:sender',
   MessageAck: 'message:ack',
   Call: 'call:incoming',
 } as const;

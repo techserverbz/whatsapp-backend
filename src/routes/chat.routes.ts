@@ -5,11 +5,20 @@ import { resolveRealNumber } from '../whatsapp/lid';
 import { cacheMessages } from '../whatsapp/msgCache';
 import { archiveMessages, readArchive } from '../whatsapp/msgStore';
 import { addNote, deleteNote, getNoteChatIds, getNotes } from '../notes';
+import { attachSenders } from '../attribution';
+import { config } from '../config';
 
 const router = Router();
 
-const MAX_MESSAGES = 200;
+// Raised from 200 so a single request can return deep history. The real
+// "show older messages" fix is the back-loading loop below (it mirrors
+// whatsapp-web.js `fetchMessages({ limit })`, which the WPPConnect store won't
+// do on its own — it only keeps a recent window).
+const MAX_MESSAGES = 2000;
 const DEFAULT_MESSAGES = 50;
+const BACKFILL_MAX_ROUNDS = 60;        // safety cap on loadEarlierMessages iterations per request
+const EARLIER_SETTLE_MS = 350;         // wait after each loadEarlierMessages so async history can arrive
+const EMPTY_ROUNDS_BEFORE_STOP = 5;    // consecutive empty rounds that mean we've truly reached the start
 
 /** All chats (conversations), newest activity first. */
 router.get('/', async (_req, res, next) => {
@@ -66,22 +75,44 @@ router.get('/:chatId/messages', async (req, res, next) => {
       if (older.length < count) {
         try {
           const client = session.getClient();
-          await client.loadEarlierMessages(chatId);
-          const live: any[] = await client.getMessages(chatId, {
-            count,
-            id: before,
-            direction: 'before',
-          } as any);
-          cacheMessages(live);
-          if (live.length) {
-            archiveMessages(chatId, live.map(serializeMessage));
+          // Back-load older history from the phone until the archive can satisfy
+          // `count` messages older than `before`, or WhatsApp has nothing older
+          // left. WPPConnect's store keeps only a recent window and won't backfill
+          // on its own, so we drive it with REPEATED loadEarlierMessages calls —
+          // the equivalent of whatsapp-web.js `fetchMessages({ limit })`. (The old
+          // code called loadEarlierMessages just once, so history stopped early.)
+          let prevOlderTotal = readArchive(chatId, Number.MAX_SAFE_INTEGER, before).length;
+          let emptyRounds = 0;
+          for (let round = 0; round < BACKFILL_MAX_ROUNDS && older.length < count; round++) {
+            await client.loadEarlierMessages(chatId);
+            // WhatsApp pulls earlier history from the phone ASYNChronously, so give
+            // the store a beat to populate before we read it back.
+            await new Promise((r) => setTimeout(r, EARLIER_SETTLE_MS));
+            const live: any[] = await client.getMessages(chatId, {
+              count,
+              id: before,
+              direction: 'before',
+            } as any);
+            cacheMessages(live);
+            if (live.length) archiveMessages(chatId, live.map(serializeMessage));
             older = readArchive(chatId, count, before);
+            const olderTotal = readArchive(chatId, Number.MAX_SAFE_INTEGER, before).length;
+            if (olderTotal <= prevOlderTotal) {
+              // No new older messages THIS round — but since loading is async, don't
+              // give up yet. Only conclude we've hit the true start of the chat after
+              // several consecutive empty rounds (prevents a premature "Start of
+              // conversation" while WhatsApp is still backfilling from the phone).
+              if (++emptyRounds >= EMPTY_ROUNDS_BEFORE_STOP) break;
+            } else {
+              emptyRounds = 0;
+              prevOlderTotal = olderTotal;
+            }
           }
         } catch {
           /* not connected / reached the real start — serve what the archive has */
         }
       }
-      return res.json(older);
+      return res.json(await attachSenders(older, config.session));
     }
 
     // ---- Initial open ----
@@ -91,7 +122,7 @@ router.get('/:chatId/messages', async (req, res, next) => {
     // stream in over the socket, so an open chat stays current.
     const cached = readArchive(chatId, count);
     if (cached.length) {
-      res.json(cached);
+      res.json(await attachSenders(cached, config.session));
       void (async () => {
         try {
           const client = session.getClient();
@@ -110,7 +141,7 @@ router.get('/:chatId/messages', async (req, res, next) => {
     const messages: any[] = await client.getMessages(chatId, { count } as any);
     cacheMessages(messages);
     archiveMessages(chatId, messages.map(serializeMessage));
-    res.json(readArchive(chatId, count));
+    res.json(await attachSenders(readArchive(chatId, count), config.session));
   } catch (e) {
     next(e);
   }

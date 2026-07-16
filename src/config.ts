@@ -88,8 +88,12 @@ export const config = {
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB ?? 32),
   /** WhatsApp session name — also the token folder key. */
   session: process.env.WPP_SESSION ?? 'wpp-standalone',
-  /** Where WPPConnect persists auth tokens so re-login is not needed. */
-  tokenFolder: process.env.WPP_TOKEN_FOLDER ?? './tokens',
+  /**
+   * Where WPPConnect persists its auth tokens/profile so re-login is not needed.
+   * Kept inside the project as `./wwp` (renamed from `./tokens`) so a copy of the
+   * backend folder carries the WPPConnect session with it.
+   */
+  tokenFolder: process.env.WPP_TOKEN_FOLDER ?? './wwp',
   /** Where per-chat notes (and other app data) are persisted (survives logout). */
   dataFolder: process.env.WPP_DATA_FOLDER ?? './data',
   /** Headless puppeteer. Set WPP_HEADLESS=false to watch the browser. */
