@@ -5,8 +5,17 @@
 // re-running just re-applies the same funnel config — and it NEVER blocks the
 // server from starting: if Tailscale is missing or errors, it warns and exits 0.
 import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
-const PORT = process.env.PORT ?? '8099';
+// Read the same .env the server does, so the funnel can't drift to a port nothing
+// is listening on. Resolved from this file rather than cwd — the server's own
+// dotenv.config() is cwd-relative, but this script must work from any cwd.
+// dotenv never overwrites an existing var, so `PORT=1234 npm run dev` still wins.
+dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.env') });
+
+const PORT = process.env.PORT ?? '5000';
 
 // Resolve a working `tailscale` command. Prefer PATH; fall back to the default
 // Windows install location so this keeps working even if PATH isn't set up.
@@ -20,7 +29,11 @@ const CANDIDATES = [
 ];
 
 function run(bin, args) {
-  return spawnSync(bin, args, { encoding: 'utf8', shell: true });
+  // shell:true is what lets Windows resolve a bare `tailscale` via PATHEXT, but it
+  // also means the shell re-parses the command — so a path with spaces must be
+  // quoted or cmd splits it ("'C:\Program' is not recognized").
+  const cmd = /\s/.test(bin) ? `"${bin}"` : bin;
+  return spawnSync(cmd, args, { encoding: 'utf8', shell: true });
 }
 
 function resolveTailscale() {
@@ -57,8 +70,10 @@ try {
   // best-effort only
 }
 
-console.log('[tunnel] ─────────────────────────────────────────────');
-console.log(`[tunnel] Tailscale Funnel is exposing  http://127.0.0.1:${PORT}`);
-if (url) console.log(`[tunnel] Public URL:  ${url}`);
-console.log('[tunnel] ─────────────────────────────────────────────');
+console.log('');
+console.log('  ─────────────────────────────────────────────────────────');
+console.log(`  Local:   http://localhost:${PORT}`);
+console.log(`  Public:  ${url || '(tailscale status unavailable — funnel is up)'}`);
+console.log('  ─────────────────────────────────────────────────────────');
+console.log('');
 process.exit(0);

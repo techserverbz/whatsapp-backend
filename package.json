@@ -4,8 +4,10 @@
   "description": "Standalone WhatsApp Web backend powered by WPPConnect (REST API + Socket.io)",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "dev:tunnel": "node scripts/tunnel-up.mjs && tsx watch src/index.ts",
+    "predev": "node scripts/free-port.mjs",
+    "dev": "node scripts/tunnel-up.mjs && tsx watch src/index.ts",
+    "dev:local": "tsx watch src/index.ts",
+    "port:free": "node scripts/free-port.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "start:tunnel": "node scripts/tunnel-up.mjs && node dist/index.js",
