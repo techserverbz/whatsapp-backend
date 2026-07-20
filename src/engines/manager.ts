@@ -104,6 +104,24 @@ class SessionManager {
     return engine;
   }
 
+  /**
+   * Close every live engine's browser on process shutdown, keeping the WhatsApp
+   * links intact. Without this the engines' Chromium processes are killed along
+   * with the parent, which can corrupt an auth profile mid-write and cost a QR
+   * re-scan. Never rejects: shutdown must proceed even if one engine misbehaves.
+   */
+  async shutdownAll(): Promise<void> {
+    await Promise.all(
+      [...this.engines.values()].map(async (engine) => {
+        try {
+          await engine.disconnect?.();
+        } catch {
+          /* best effort — keep closing the others */
+        }
+      }),
+    );
+  }
+
   async remove(id: string): Promise<void> {
     const engine = this.engines.get(id);
     if (engine) {

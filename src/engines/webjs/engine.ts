@@ -24,6 +24,36 @@ import type {
   WhatsAppEngine,
 } from '../common/engine';
 
+/**
+ * Base dir holding one LocalAuth Chromium profile per session.
+ *
+ * CRITICAL (Windows): keep this SHORT. Under a long project path, whatsapp-web.js's
+ * deeply-nested profile files exceed the 260-char MAX_PATH limit, crashing the page
+ * mid-injection with "Execution context was destroyed" so the QR never appears.
+ * LocalAuth appends `session-<clientId>`, so this base must stay short.
+ */
+export function webJsDataPath(): string {
+  return (
+    process.env.WA_SESSION_PATH ||
+    (process.platform === 'win32' ? 'C:\\wa-sessions' : path.join(os.homedir(), '.wa-sessions'))
+  );
+}
+
+/**
+ * True when `sessionId` has a LocalAuth profile on disk — i.e. it was linked once
+ * and can reconnect with no QR re-scan. Boot-time resume is gated on this: calling
+ * start() on a never-linked session would just spawn a Chromium to render a QR
+ * nobody is watching.
+ */
+export function hasSavedWebJsSession(sessionId: string): boolean {
+  try {
+    const dir = path.join(webJsDataPath(), `session-${sessionId}`);
+    return fs.existsSync(dir) && fs.readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'ptt', 'document', 'sticker']);
 
 /** whatsapp-web.js message -> unified MessageDTO. */
@@ -140,14 +170,7 @@ export class WebJsEngine extends EventEmitter implements WhatsAppEngine {
    * error whatsapp-web.js sometimes throws while WhatsApp Web finishes loading.
    */
   private launch(attempt: number): void {
-    // CRITICAL (Windows): keep the Chromium user-data-dir SHORT. Under a long
-    // project path, whatsapp-web.js's deeply-nested profile files exceed the
-    // 260-char MAX_PATH limit, crashing the page mid-injection with
-    // "Execution context was destroyed" so the QR never appears. LocalAuth
-    // appends `session-<clientId>`, so this base must stay short.
-    const dataPath =
-      process.env.WA_SESSION_PATH ||
-      (process.platform === 'win32' ? 'C:\\wa-sessions' : path.join(os.homedir(), '.wa-sessions'));
+    const dataPath = webJsDataPath();
     // Force WhatsApp Web to reload on our PINNED build every connect. WA's
     // service worker silently self-updates to the latest build, which
     // whatsapp-web.js@1.34.7 can't read (getChats throws `r: r` -> "no
@@ -329,26 +352,48 @@ export class WebJsEngine extends EventEmitter implements WhatsAppEngine {
   }
 
   /**
-   * Delete the Chromium HTTP/service-worker caches for this session's profile
-   * (keeps IndexedDB / Local Storage, so the WhatsApp login survives). Best-
-   * effort & synchronous — safe to call right before launching the client.
+   * Drop the service worker for this session's profile (keeps IndexedDB / Local
+   * Storage, so the WhatsApp login survives). Best-effort & synchronous — safe
+   * to call right before launching the client.
+   *
+   * ONLY the service worker: it can intercept navigation and serve a whole
+   * different WhatsApp Web app shell, which is what defeats the `webVersion`
+   * pin and brings back the `r: r` / "no chats" failure.
+   *
+   * The HTTP and code caches used to be wiped here too, which forced WhatsApp
+   * Web to re-download and re-JIT its entire bundle on EVERY connect — the main
+   * reason a restart took minutes to come back. Those entries are keyed by
+   * immutable versioned URLs, so keeping them cannot serve a stale build.
+   * If `r: r` ever returns, adding 'Cache' and 'Code Cache' back here is the
+   * first thing to try.
    */
   private clearWebCache(dataPath: string): void {
     const base = path.join(dataPath, `session-${this.id}`, 'Default');
-    for (const sub of [
-      'Service Worker',
-      'Cache',
-      'Code Cache',
-      'GPUCache',
-      'DawnGraphiteCache',
-      'DawnWebGPUCache',
-    ]) {
+    for (const sub of ['Service Worker']) {
       try {
         fs.rmSync(path.join(base, sub), { recursive: true, force: true });
       } catch {
         /* not present / locked — ignore */
       }
     }
+  }
+
+  /**
+   * Close the browser WITHOUT logging out, so the next start reconnects with no
+   * QR. Note the deliberate absence of a `logout()` call — that would invalidate
+   * the WhatsApp link, which is exactly what must survive a restart.
+   */
+  async disconnect(): Promise<void> {
+    this.stopConnectPoll();
+    try {
+      // destroy() closes the page and the browser, letting Chromium flush its
+      // auth profile to disk. Skipping this is what risks a corrupted session.
+      await this.client?.destroy();
+    } catch {
+      /* already gone */
+    }
+    this.client = null;
+    this.setState('DISCONNECTED', { qr: null });
   }
 
   async logout(): Promise<void> {
@@ -508,6 +553,27 @@ export class WebJsEngine extends EventEmitter implements WhatsAppEngine {
     const chat = await this.need().getChatById(chatId);
     if (on) await chat.sendStateTyping();
     else await chat.clearState();
+  }
+
+  /**
+   * Save a number into the linked WhatsApp account's contact list.
+   *
+   * `syncToAddressbook: true` ALSO writes the contact to the address book on the
+   * linked phone. That is required, not cosmetic: with `false` the contact is
+   * only recorded server-side (the number really does flip to isMyContact), but
+   * the WhatsApp mobile app builds the contact list it displays from the phone's
+   * address book — so a contact saved with `false` is invisible in the app and
+   * the feature looks broken. Verified by write-test on 2026-07-20.
+   *
+   * whatsapp-web.js implements this by calling a WhatsApp Web internal module
+   * (`WAWebSaveContactAction`) by name, so it can break on a WhatsApp update
+   * even though nothing here changed. Callers must treat failure as non-fatal.
+   */
+  async saveContact(phone: string, firstName: string, lastName = ''): Promise<void> {
+    // WA wants bare digits with a country code and no "+" (e.g. "919820282994").
+    const number = phone.split('@')[0].replace(/\D/g, '');
+    if (!number) throw new Error('a phone number is required');
+    await this.need().saveOrEditAddressbookContact(number, firstName, lastName, true);
   }
 
   async getContact(chatId: string): Promise<ContactInfo> {

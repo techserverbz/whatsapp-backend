@@ -86,6 +86,15 @@ export interface WhatsAppEngine {
 
   // ---- lifecycle ----
   start(): Promise<void>;
+  /**
+   * Close the browser but KEEP the WhatsApp link — the opposite of logout().
+   *
+   * Called on process shutdown so the engine's Chromium is closed in an orderly
+   * way instead of being killed with the process. That matters: the auth profile
+   * is a LevelDB store, and killing Chromium mid-write can corrupt it badly
+   * enough to force a QR re-scan. Optional so engines without a browser can skip.
+   */
+  disconnect?(): Promise<void>;
   logout(): Promise<void>;
   getStatus(): EngineStatus;
 
@@ -102,6 +111,15 @@ export interface WhatsAppEngine {
   sendFile(chatId: string, base64: string, opts: SendFileOpts): Promise<MessageDTO>;
 
   // ---- presence / contact ----
+  /**
+   * Save a number into the linked WhatsApp account's own contact list.
+   *
+   * OPTIONAL — only engines whose library exposes a contact-WRITE API implement
+   * it (whatsapp-web.js does; WPPConnect does not). Callers must treat a missing
+   * method as "unsupported" rather than an error: the CRM add-contact route is
+   * best-effort and must never fail a CRM write because of this.
+   */
+  saveContact?(phone: string, firstName: string, lastName?: string): Promise<void>;
   sendSeen(chatId: string): Promise<void>;
   setTyping(chatId: string, on: boolean): Promise<void>;
   getContact(chatId: string): Promise<ContactInfo>;

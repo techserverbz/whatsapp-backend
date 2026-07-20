@@ -43,9 +43,13 @@ export function initSocket(httpServer: HttpServer): Server {
       const bearer = socket.handshake.auth?.token as string | undefined;
       const token = cookieToken ?? bearer;
       const user = await authenticateToken(token);
-      if (!user) return next(new Error('Not authenticated'));
+      if (!user) {
+        console.warn(`[socket] Auth failed for socket ${socket.id}. Token: ${token ? 'present' : 'missing'}`);
+        return next(new Error('Not authenticated'));
+      }
       socket.data.crmToken = token; // for periodic revalidation
       socket.data.isAdmin = isAdminUser(user); // gate QR to admins only
+      console.log(`[socket] Auth success for socket ${socket.id}, user: ${user.email}, isAdmin: ${socket.data.isAdmin}`);
       return next();
     }
 

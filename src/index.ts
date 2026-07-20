@@ -19,12 +19,14 @@ import type { CrmUser } from './auth';
 import { emitToAll, initSocket, SocketEvents, startSocketRevalidation } from './socket';
 import { session } from './whatsapp/session';
 import { manager } from './engines/manager';
+import { hasSavedWebJsSession } from './engines/webjs/engine';
 import sessionRoutes from './routes/session.routes';
 import sessionsRoutes from './routes/sessions.routes';
 import chatRoutes from './routes/chat.routes';
 import messageRoutes from './routes/message.routes';
 import attributionRoutes from './routes/attribution.routes';
 import crmRoutes from './routes/crm.routes';
+import waContactsRoutes from './routes/waContacts.routes';
 import accessRoutes from './routes/access.routes';
 
 const app = express();
@@ -204,7 +206,11 @@ function permNeeded(method: string, path: string): 'admin' | 'send' | null {
     (method === 'POST' && (path === '/messages/text' || path === '/messages/file')) ||
     (method === 'POST' && /^\/chats\/[^/]+\/(seen|typing)$/.test(path)) ||
     (method === 'POST' && /^\/sessions\/[^/]+\/messages\/(text|file)$/.test(path)) ||
-    (method === 'POST' && /^\/sessions\/[^/]+\/chats\/[^/]+\/(seen|typing)$/.test(path));
+    (method === 'POST' && /^\/sessions\/[^/]+\/chats\/[^/]+\/(seen|typing)$/.test(path)) ||
+    // Saving a WhatsApp contact writes to the real linked account (and, with
+    // syncToAddressbook, to the phone's address book), so it is gated like any
+    // other write rather than treated as a read-only lookup.
+    (method === 'POST' && path === '/wa-contacts/save');
   if (isSend) return 'send';
   return null;
 }
@@ -241,6 +247,7 @@ app.use('/api/chats', chatRoutes);
 app.use('/api/messages', messageLimiter, messageRoutes);
 app.use('/api/attribution', attributionRoutes); // "who sent what" audit log
 app.use('/api/crm', crmRoutes); // CRM contact lookup + create (dual naming)
+app.use('/api/wa-contacts', waContactsRoutes); // save a number to WhatsApp's own contacts
 app.use('/api/access', accessRoutes); // per-user send-access allow-list (admin-only)
 
 // Centralised error handler. Expected 4xx (e.g. the 409 "not connected" case,
@@ -288,6 +295,33 @@ function hasSavedSession(): boolean {
   }
 }
 
+/**
+ * Reconnect multi-engine sessions that were linked before the last shutdown.
+ *
+ * The manager persists session METADATA, and `ensure()` rebuilds an engine object
+ * on demand — but a rebuilt engine is inert until `start()` runs, and nothing else
+ * calls it at boot. Without this, a reboot leaves every linked session listed in
+ * the UI but DISCONNECTED, which is indistinguishable from the "no chats" failure.
+ * That matters on a box meant to run unattended: no one is there to click Connect.
+ */
+function resumeSavedEngineSessions(): void {
+  // wppconnect sessions still run on the legacy singleton resumed just above;
+  // only webjs sessions are owned by the manager today.
+  const resumable = manager.list().filter((m) => m.kind === 'webjs' && hasSavedWebJsSession(m.id));
+  if (!resumable.length) return;
+
+  resumable.forEach((meta, i) => {
+    // Stagger the launches: each start() spawns a Chromium, and firing them all at
+    // once competes with everything else Windows is doing in the first seconds of boot.
+    setTimeout(() => {
+      const engine = manager.ensure(meta.id);
+      if (!engine) return;
+      console.log(`[manager] resuming saved session ${meta.id} ("${meta.label}") — no QR needed…`);
+      engine.start().catch((e) => console.error(`[manager] resume failed for ${meta.id}:`, e));
+    }, i * 5000);
+  });
+}
+
 httpServer.listen(config.port, config.host, () => {
   console.log(`\n  wpp-backend ready`);
   console.log(`  ├─ REST:   http://localhost:${config.port}/api`);
@@ -308,19 +342,39 @@ httpServer.listen(config.port, config.host, () => {
     console.log('[wpp] saved session found — auto-resuming (no QR needed)…');
     session.start().catch((e) => console.error('[wpp] auto-resume failed:', e));
   }
+
+  if (config.autoStart) resumeSavedEngineSessions();
 });
 
 // Graceful shutdown: close the browser but DO NOT log out (logout would
 // invalidate the WhatsApp link and force a QR re-scan on the next start).
+let shuttingDown = false;
 const shutdown = async (signal: string) => {
+  if (shuttingDown) return; // a second signal must not race the first teardown
+  shuttingDown = true;
   console.log(`\n[wpp-backend] received ${signal}, shutting down (session preserved)…`);
   try {
     await session.disconnect();
   } catch {
     /* ignore */
   }
+  // Close the multi-engine sessions too. This was missing: only the legacy
+  // singleton was being torn down, so every webjs Chromium was killed with the
+  // process instead of closing cleanly — the one thing most likely to corrupt an
+  // auth profile and force a QR re-scan after a restart.
+  try {
+    await manager.shutdownAll();
+  } catch {
+    /* ignore */
+  }
   httpServer.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
+  // Chromium needs longer than the old 3s to flush its profile; exiting early
+  // would reintroduce exactly the abrupt kill this teardown exists to avoid.
+  setTimeout(() => process.exit(0), 15_000).unref();
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
+// tsx watch restarts and Windows console closes arrive as SIGHUP/SIGBREAK, not
+// SIGTERM. Without these, an editor-triggered reload skips the teardown above.
+process.on('SIGHUP', () => void shutdown('SIGHUP'));
+process.on('SIGBREAK', () => void shutdown('SIGBREAK'));

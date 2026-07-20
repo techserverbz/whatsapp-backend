@@ -51,7 +51,33 @@ for (const pid of pids) {
     process.exit(1);
   }
 
-  // /T kills the whole tree — the orphaned grandchild is the usual culprit.
+  // Ask politely FIRST. The server's SIGTERM/SIGBREAK handler closes the
+  // WhatsApp browser cleanly; killing it outright (/F) skips that and can
+  // corrupt the Chromium auth profile mid-write, costing a QR re-scan. Escalate
+  // to /F only if it is still holding the port after the grace period.
+  const stillListening = () =>
+    sh('netstat -ano -p tcp')
+      .split('\n')
+      .some((l) => {
+        const m = l.trim().match(/^TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
+        return m && m[2] === String(PORT) && m[3] === String(pid);
+      });
+
+  console.log(`  [port] asking PID ${pid} to shut down (preserving the WhatsApp session)…`);
+  spawnSync(`taskkill /T /PID ${pid}`, { encoding: 'utf8', shell: true });
+
+  const GRACE_MS = 20_000;
+  const startedAt = Date.now();
+  while (stillListening() && Date.now() - startedAt < GRACE_MS) {
+    spawnSync(`powershell -NoProfile -Command "Start-Sleep -Milliseconds 500"`, { shell: true });
+  }
+
+  if (!stillListening()) {
+    console.log(`  [port] reclaimed :${PORT} from PID ${pid} (clean shutdown)`);
+    continue;
+  }
+
+  console.warn(`  [port] PID ${pid} did not exit in ${GRACE_MS / 1000}s — forcing.`);
   const res = spawnSync(`taskkill /F /T /PID ${pid}`, { encoding: 'utf8', shell: true });
   if (res.status === 0) console.log(`  [port] reclaimed :${PORT} from stale PID ${pid}`);
   else console.warn(`  [port] could not kill PID ${pid} — may need admin.`);

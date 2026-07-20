@@ -266,7 +266,14 @@ router.patch('/contact/:id', async (req, res, next) => {
   }
 });
 
-/** Add a contact to the CRM: { firstName, lastName?, phone }. */
+/**
+ * Add a contact to the CRM: { firstName, lastName?, phone }.
+ *
+ * CRM only. Saving the same number into WhatsApp's own contacts is a SEPARATE
+ * action (POST /wa-contacts/save) so either can be done without the other —
+ * a number already in the CRM can still be pushed to WhatsApp later, and a
+ * number already in WhatsApp can be added to the CRM alone.
+ */
 router.post('/contact', async (req, res, next) => {
   try {
     const { token, userId } = ctx(req);
