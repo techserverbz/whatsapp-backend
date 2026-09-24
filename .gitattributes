@@ -1,0 +1,4 @@
+# Shell scripts MUST use LF even when committed from Windows, or the shebang
+# and heredocs break on Linux ("bad interpreter: /usr/bin/env bash^M").
+*.sh text eol=lf
+deploy/oracle-native-setup.sh text eol=lf

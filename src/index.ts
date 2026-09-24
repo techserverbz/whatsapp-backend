@@ -35,7 +35,26 @@ const app = express();
 // terminates TLS and forwards to 127.0.0.1. Trust ONLY the loopback proxy so
 // req.ip / req.protocol reflect the real client (correct per-client rate
 // limiting + logs) without trusting any spoofable external X-Forwarded-For.
-app.set('trust proxy', 'loopback');
+//
+// Behind a Cloudflare Tunnel the immediate peer is the `cloudflared` sidecar,
+// which is NOT loopback — leaving this as 'loopback' would collapse every
+// request to one rate-limit bucket and make req.secure false (dropping the
+// cookie Secure flag). Set TRUST_PROXY=true in the container: it is safe there
+// because the origin is ONLY reachable via the tunnel, never directly. Unset
+// (native Windows deploy) keeps the original loopback-only behaviour.
+const trustProxyEnv = process.env.TRUST_PROXY;
+app.set(
+  'trust proxy',
+  trustProxyEnv === undefined || trustProxyEnv === ''
+    ? 'loopback'
+    : trustProxyEnv === 'true'
+      ? true
+      : trustProxyEnv === 'false'
+        ? false
+        : /^\d+$/.test(trustProxyEnv)
+          ? Number(trustProxyEnv)
+          : trustProxyEnv,
+);
 
 // Credentialed CORS so the CRM `crm_token` cookie is sent from the frontend.
 app.use(cors({ origin: (origin, cb) => cb(null, isAllowedOrigin(origin)), credentials: true }));

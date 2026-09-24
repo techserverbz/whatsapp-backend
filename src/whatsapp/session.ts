@@ -180,8 +180,19 @@ class WppSession {
       disableWelcome: true,
       updatesLog: false,
       logQR: false,
+      // In a container we use the apt-installed system Chromium deterministically.
+      // wppconnect's default `useChrome: true` runs chrome-launcher, which IGNORES
+      // PUPPETEER_EXECUTABLE_PATH — so when that env is set (Docker) we turn it off
+      // and pass executablePath explicitly. Native dev (env unset) keeps the old
+      // behaviour (useChrome finds installed Chrome). `--disable-dev-shm-usage` is
+      // added here because this args override otherwise drops puppeteer's default,
+      // and Chromium crashes on the 64MB /dev/shm most containers ship with.
+      useChrome: !process.env.PUPPETEER_EXECUTABLE_PATH,
       puppeteerOptions: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        ...(process.env.PUPPETEER_EXECUTABLE_PATH
+          ? { executablePath: process.env.PUPPETEER_EXECUTABLE_PATH }
+          : {}),
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       },
       catchQR: (base64Qr, _asciiQR, attempts, urlCode) => {
         this.qr = base64Qr;
