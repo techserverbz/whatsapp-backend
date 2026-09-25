@@ -171,30 +171,37 @@ export class WebJsEngine extends EventEmitter implements WhatsAppEngine {
    */
   private launch(attempt: number): void {
     const dataPath = webJsDataPath();
-    // Force WhatsApp Web to reload on our PINNED build every connect. WA's
-    // service worker silently self-updates to the latest build, which
-    // whatsapp-web.js@1.34.7 can't read (getChats throws `r: r` -> "no
-    // conversations"). Wiping the SW/HTTP cache (NOT IndexedDB/Local Storage,
-    // which hold the login) makes the page re-fetch under our webVersion pin,
-    // so the compatible build always loads and no QR re-scan is needed.
+    // Drop only the service worker (keeps IndexedDB/Local Storage = the login) so
+    // a stale SW can't serve a different app shell than the build we intend to run.
     this.clearWebCache(dataPath);
+    // Web-build strategy. WhatsApp FORCE-UNLINKS a deprecated web build a few
+    // minutes after connect (symptom: links, then ~5 min later the page navigates
+    // to the QR screen and you must re-scan). A hard-pinned build therefore rots:
+    // it works until WhatsApp ages it out. So by DEFAULT we DON'T pin — the client
+    // loads whatever build WhatsApp currently serves, which is never "too old".
+    //
+    // The historical reason for pinning was that some builds break whatsapp-web.js
+    // @1.34.7's injected layer (`r: r` -> getChats/send all fail, "no chats"). If a
+    // future LIVE build regresses that way, pin a known-good build by setting
+    // WA_WEB_VERSION=<build>; it is fetched from the wppconnect wa-version CDN
+    // (kept current), NOT the stale local .wwebjs_cache. Prefer the newest CDN
+    // build that still injects cleanly, so it also isn't force-unlinked.
+    const pinnedVersion = (process.env.WA_WEB_VERSION ?? '').trim();
     const client = new Client({
       authStrategy: new LocalAuth({ clientId: this.id, dataPath }),
       puppeteer: {
         headless: config.headless,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       },
-      // Pin WhatsApp Web to the EXACT build whatsapp-web.js@1.34.7's injected
-      // layer is compatible with. On other builds the in-page helpers throw
-      // `r: r` and getChats/getChatById/sendMessage all fail. This build
-      // (2.3000.1043126001) is the one the known-good reference (v3) runs on;
-      // its HTML is vendored locally at .wwebjs_cache/ so we never depend on a
-      // remote fetch (the wa-version repo doesn't host this build).
-      webVersion: process.env.WA_WEB_VERSION || '2.3000.1043126001',
-      webVersionCache: {
-        type: 'local',
-        path: path.resolve(process.cwd(), '.wwebjs_cache'),
-      },
+      ...(pinnedVersion
+        ? {
+            webVersion: pinnedVersion,
+            webVersionCache: {
+              type: 'remote' as const,
+              remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${pinnedVersion}.html`,
+            },
+          }
+        : {}),
     });
     this.client = client;
     this.attach(client);

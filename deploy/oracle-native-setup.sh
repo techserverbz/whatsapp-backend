@@ -126,7 +126,8 @@ log "npm run build (tsc -> dist)"
 npm run build
 
 # ---- 7. Persistent state dirs (non-hidden; survive redeploys) --------------
-mkdir -p "$APP_DIR/wwp" "$APP_DIR/data" "$APP_DIR/wa-sessions"
+# Layout mirrors the Windows PC so deploy/restore-state.sh is a clean extract.
+mkdir -p "$APP_DIR/tokens" "$APP_DIR/data" "$APP_DIR/wa-sessions"
 
 # ---- 8. .env ---------------------------------------------------------------
 ENV_NEEDS_SECRETS=0

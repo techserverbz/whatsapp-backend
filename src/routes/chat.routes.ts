@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { session } from '../whatsapp/session';
 import { serializeChat, serializeMessage } from '../whatsapp/serializers';
-import { resolveRealNumber } from '../whatsapp/lid';
+import { resolveRealNumber, attachRealNumbers } from '../whatsapp/lid';
 import { cacheMessages } from '../whatsapp/msgCache';
 import { archiveMessages, readArchive } from '../whatsapp/msgStore';
 import { addNote, deleteNote, getNoteChatIds, getNotes } from '../notes';
@@ -26,6 +26,9 @@ router.get('/', async (_req, res, next) => {
     const client = session.getClient();
     const chats: any[] = await client.listChats();
     const dto = chats.map(serializeChat).sort((a, b) => b.timestamp - a.timestamp);
+    // @lid (privacy Linked ID) chats — e.g. many saved contacts — carry no phone
+    // in their id, so resolve and attach the real number for search/CRM matching.
+    await attachRealNumbers(client, dto);
     res.json(dto);
   } catch (e) {
     next(e);
